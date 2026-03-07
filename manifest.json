@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "APA 7.ª edición – Adaptación UOC",
+  "version": "1.0.0",
+  "description": "Adapta las citas APA 7 al formato UOC: nombre completo entre corchetes [Nombre] tras las iniciales y uso de «y» en lugar de «&».",
+  "homepage_url": "https://github.com/aramosalv/zotero-apa7-uoc",
+  "author": "Antonio Ramos Alves",
+  "applications": {
+    "zotero": {
+      "id": "apa7-uoc@zotero-plugins.org",
+      "update_url": "https://raw.githubusercontent.com/aramosalv/zotero-apa7-uoc/main/updates.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "7.*"
+    }
+  }
+}

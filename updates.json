@@ -1,0 +1,17 @@
+{
+  "addons": {
+    "apa7-uoc@zotero-plugins.org": {
+      "updates": [
+        {
+          "version": "1.0.0",
+          "update_link": "https://github.com/aramosalv/zotero-apa7-uoc/releases/download/v1.0.0/zotero-apa7-uoc-1.0.0.xpi",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "6.999"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
