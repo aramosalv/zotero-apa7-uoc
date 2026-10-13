@@ -217,7 +217,10 @@ var APA7UOC = {
       let text = " [" + escape(nm.given) + "]";
       // "Apellido, I. (2020)" → "Apellido, I. [Nombre]. (2020)": el punto de las
       // iniciales cerraba el bloque de autoría; tras el corchete hay que reponerlo.
-      if (/^\s+\(\d{4}/.test(entry.slice(pick.end))) text += ".";
+      // Vale para cualquier fecha: año, "(s. f.)", "(n.d.)", "(s. f.-a)". No se
+      // pone ante el rol de los editores, "(Ed.). (2013)": un paréntesis seguido de
+      // otro paréntesis es el rol, y el segundo, la fecha.
+      if (this._dateFollows(entry.slice(pick.end))) text += ".";
       inserts.push({ pos: pick.end, text });
     }
 
@@ -225,6 +228,13 @@ var APA7UOC = {
     let out = entry;
     for (const ins of inserts) out = out.slice(0, ins.pos) + ins.text + out.slice(ins.pos);
     return out;
+  },
+
+  /** ¿Empieza `rest` por la fecha del bloque de autoría, y no por el rol? */
+  _dateFollows(rest) {
+    const m = /^\s+\([^()]*\)/.exec(rest);
+    if (!m) return false;
+    return !/^\.?\s+\(/.test(rest.slice(m[0].length));
   },
 
   /**

@@ -84,6 +84,43 @@ const caso = (nombre, items, esperado, opciones) => casos.push(Object.assign({ n
   });
 }
 
+// --- Sin fecha: el punto tras el corchete va igual que ante un año -----------
+{
+  const sf = (id, author, title, extra) => Object.assign({ id, type: "article-journal", author, title, "container-title": "Revista", volume: "1", page: "1-10" }, extra || {});
+  const a = sf("sf1", [p("Pérez", "Juan")], "Sin fecha");
+  const b = sf("sf2", [p("Pérez", "Juan"), p("Gil", "Ana")], "Sin fecha, dos autores");
+  caso("Sin fecha: punto tras el corchete ante (s. f.)", [a, b], {
+    [a.id]: { empieza: "Pérez, J. [Juan]. (s. f.)." },
+    [b.id]: { empieza: "Pérez, J. [Juan] y Gil, A. [Ana]. (s. f.)." },
+  });
+  const c = sf("sf3", [p("Smith", "John")], "No date", { language: "en" });
+  caso("Sin fecha en inglés: punto tras el corchete ante (n.d.)", [c], {
+    [c.id]: { empieza: "Smith, J. [John]. (n.d.)." },
+  }, { lang: "en-US" });
+  const d = sf("sf4", [p("Puig", "Jordi")], "Sense data");
+  caso("Sin fecha en catalán: punto tras el corchete", [d], {
+    [d.id]: { empieza: "Puig, J. [Jordi]. (s.d.)." },
+  }, { lang: "ca-AD" });
+}
+{
+  const a = { id: "ed2", type: "book", editor: [p("Bermejo", "Blas"), p("Reig", "Carlos")], issued: { "date-parts": [[2003]] }, title: "Las dificultades de aprendizaje", publisher: "UGT" };
+  const b = { id: "ed3", type: "book", editor: [p("Bermejo", "Blas")], title: "Obra sin fecha", publisher: "UGT" };
+  caso("Editores: corchete en el nombre de pila y ningún punto antes de (Eds.)", [a, b], {
+    [a.id]: { empieza: "Bermejo, B. [Blas] y Reig, C. [Carlos] (Eds.). (2003)." },
+    [b.id]: { empieza: "Bermejo, B. [Blas] (Ed.). (s. f.)." },
+  });
+}
+
+{
+  // Como en la biblioteca real del autor: tres capítulos sin fecha del mismo autor.
+  const cap = (id, title) => ({ id, type: "chapter", author: [p("Pozo Municio", "Juan Ignacio")], title, "container-title": "Aprendices y maestros", publisher: "Alianza" });
+  const a = cap("pz1", "Aprendizaje verbal y conceptual"), b = cap("pz2", "El aprendizaje de procedimientos");
+  caso("Sin fecha con letra: (s. f.-a) y (s. f.-b)", [a, b], {
+    [a.id]: { empieza: "Pozo Municio, J. I. [Juan Ignacio]. (s. f.-a)." },
+    [b.id]: { empieza: "Pozo Municio, J. I. [Juan Ignacio]. (s. f.-b)." },
+  });
+}
+
 // --- Caracteres que se escapan por formato ---------------------------------
 {
   const a = art([p("Ballesteros Castañeda", "Blanca")], 2010, "Con eñe");
