@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "APA 7.ª edición – Adaptación UOC",
-  "version": "1.3.91",
+  "version": "1.4.0",
   "description": "Adapta las citas APA 7 al formato UOC con soporte multiidioma: nombre completo entre corchetes [Nombre] y conjunción adaptada por idioma (y/i/e/&/und).",
   "homepage_url": "https://github.com/aramosalv/zotero-apa7-uoc",
   "author": "Antonio Ramos Alves",

@@ -10,6 +10,15 @@
               "strict_min_version": "6.999"
             }
           }
+        },
+        {
+          "version": "1.4.0",
+          "update_link": "https://github.com/aramosalv/zotero-apa7-uoc/releases/download/v1.4.0/zotero-apa7-uoc-1.4.0.xpi",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "6.999"
+            }
+          }
         }
       ]
     }
