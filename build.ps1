@@ -1,58 +1,45 @@
-# build.ps1 — Empaqueta el plugin como .xpi para Zotero 7 (Windows PowerShell)
+# build.ps1 — Empaqueta el plugin como .xpi para Zotero 7 y posteriores (Windows)
 #
 # Uso: powershell -ExecutionPolicy Bypass -File build.ps1
 # Resultado: zotero-apa7-uoc-VERSION.xpi en el directorio actual
+#
+# NO usa Compress-Archive: en Windows PowerShell 5.1 escribe las rutas internas
+# con "\" (así salió la v1.3.0), y bootstrap.js carga src/apa7-uoc.js por su
+# ruta, que con "\" Zotero no encuentra. Se escribe cada entrada con "/".
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-$manifest = Get-Content "manifest.json" | ConvertFrom-Json
+$manifest = Get-Content "manifest.json" -Raw | ConvertFrom-Json
 $version = $manifest.version
-$pluginName = "zotero-apa7-uoc"
-$outputFile = "${pluginName}-${version}.xpi"
+$outputFile = "zotero-apa7-uoc-$version.xpi"
+$files = @("manifest.json", "bootstrap.js", "src/apa7-uoc.js", "csl/apa-uoc-7th.csl")
 
-Write-Host "=== Empaquetando ${pluginName} v${version} ===" -ForegroundColor Cyan
+Write-Host "=== Empaquetando zotero-apa7-uoc v$version ==="
+$xpiPath = Join-Path (Get-Location) $outputFile
+if (Test-Path $xpiPath) { Remove-Item $xpiPath }
 
-# Eliminar XPI anterior si existe
-if (Test-Path $outputFile) {
-    Remove-Item $outputFile
-}
-
-# Crear directorio temporal para la estructura del XPI
-$tempDir = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "apa7-uoc-build-$(Get-Random)") -Force
-
+$zip = [System.IO.Compression.ZipFile]::Open($xpiPath, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
-    # Copiar archivos necesarios al directorio temporal
-    Copy-Item "manifest.json" $tempDir
-    Copy-Item "bootstrap.js" $tempDir
-    Copy-Item "src" "$tempDir\src" -Recurse
-    Copy-Item "csl" "$tempDir\csl" -Recurse
-
-    # Crear el XPI (ZIP con extensión .xpi)
-    $xpiPath = Join-Path (Get-Location) $outputFile
-    Compress-Archive -Path "$tempDir\*" -DestinationPath $xpiPath -Force
-
-    # Renombrar de .zip a .xpi si es necesario
-    if ($xpiPath.EndsWith(".xpi")) {
-        # Compress-Archive crea .zip, necesitamos renombrar
-        $zipPath = $xpiPath -replace '\.xpi$', '.zip'
-        if (Test-Path $zipPath) {
-            Move-Item $zipPath $xpiPath -Force
-        }
+    foreach ($f in $files) {
+        $src = Join-Path (Get-Location) $f
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $src, $f.Replace("\", "/")) | Out-Null
     }
+} finally {
+    $zip.Dispose()
+}
 
-    $size = (Get-Item $xpiPath).Length / 1KB
-    Write-Host ""
-    Write-Host "=== Empaquetado completado ===" -ForegroundColor Green
-    Write-Host "Archivo: $outputFile"
-    Write-Host ("Tamano: {0:N1} KB" -f $size)
-    Write-Host ""
-    Write-Host "Para instalar:" -ForegroundColor Yellow
-    Write-Host "  1. Abre Zotero 7"
-    Write-Host "  2. Ve a Herramientas > Complementos"
-    Write-Host "  3. Clic en el engranaje > Instalar complemento desde archivo"
-    Write-Host "  4. Selecciona $outputFile"
+# Comprobación del paquete
+$check = [System.IO.Compression.ZipFile]::OpenRead($xpiPath)
+try {
+    $names = @($check.Entries | ForEach-Object { $_.FullName })
+    $bad = @($names | Where-Object { $_.Contains("\") })
+    if ($bad.Count -gt 0 -or $names.Count -ne $files.Count) {
+        throw "PAQUETE DEFECTUOSO: $($names -join ', ')"
+    }
+} finally {
+    $check.Dispose()
 }
-finally {
-    # Limpiar directorio temporal
-    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+Write-Host "Paquete comprobado: $($names.Count) ficheros, rutas con /."
+Write-Host "Archivo: $outputFile"

@@ -1,511 +1,322 @@
 "use strict";
 
 /**
- * apa7-uoc.js — Lógica principal del plugin APA 7 UOC para Zotero 7
+ * apa7-uoc.js — Lógica del plugin APA 7 UOC para Zotero 7 y posteriores.
+ * Lo carga bootstrap.js; es la única implementación.
  *
- * Este módulo realiza dos funciones clave:
+ * 1. INSTALA el estilo CSL propio (apa-uoc-7th.csl), que pone la conjunción
+ *    por idioma (y/i/e/&/und) en vez de "&".
  *
- * 1. INSTALA un CSL personalizado (apa-uoc-7th.csl) que usa "y" en vez de "&"
- *    antes del último autor, siguiendo la adaptación de la Biblioteca UOC.
+ * 2. ENVUELVE CSL.Engine.prototype.makeBibliography, el método del motor
+ *    citeproc-js por el que pasan TODAS las bibliografías de Zotero: «Crear
+ *    bibliografía», la copia rápida y la integración con Word, LibreOffice y
+ *    Google Docs. Si el motor usa el estilo UOC, inyecta el nombre de pila
+ *    entre corchetes tras las iniciales: "Perinat, A." → "Perinat, A. [Adolfo]".
  *
- * 2. MONKEY-PATCHES la generación de bibliografías para inyectar el nombre
- *    completo del autor entre corchetes [Nombre] tras las iniciales.
- *    Ejemplo: "Perinat, A." → "Perinat, A. [Adolfo]"
+ * Cómo se evita atribuir un nombre a quien no firmó la obra:
+ *  - Cada entrada se procesa SOLO con los nombres de sus propios ítems
+ *    (bibliography[0].entry_ids), nunca sobre la bibliografía entera.
+ *  - Dentro de la entrada, los nombres se asignan en el orden en que figuran,
+ *    consumiendo cada coincidencia una sola vez: dos coautores homónimos
+ *    reciben cada uno el suyo.
+ *  - El apellido exige frontera por la izquierda ("Ruiz" no encaja dentro de
+ *    "García Ruiz") y las iniciales se cotejan enteras ("R." no encaja dentro
+ *    de "R. J." ni "J." dentro de "J.-R.").
+ *  - Todo se busca y se inserta con el escape del formato de salida (en RTF,
+ *    "ñ" es "\uc0\u241{}"), así que funciona igual en text, html y rtf.
  *
- * El post-procesamiento SOLO se aplica a bibliografías, nunca a citas
- * parentéticas en el texto.
+ * Las citas en el texto no se tocan: no pasan por makeBibliography.
  */
 
 // eslint-disable-next-line no-unused-vars
 var APA7UOC = {
-  // ID del estilo CSL personalizado
   STYLE_ID: "http://www.zotero.org/styles/apa-uoc-7th",
 
-  // Referencia al rootURI del plugin
   _rootURI: null,
+  _enginePrototype: null,
+  _originalMakeBibliography: null,
 
-  // Funciones originales guardadas para restaurar en shutdown
-  _originalMakeFormatted: null,
-  _originalMakeFormatted2: null,
-  _originalQuickCopy: null,
+  // Conjunciones que el CSL puede poner entre el penúltimo y el último autor
+  // (and="text" según el idioma), más el ampersand en sus formas escapadas.
+  CONJUNCIONES: ["y", "e", "i", "u", "and", "und", "et", "en", "og", "och", "ja", "&", "&#38;", "&amp;"],
 
-  /**
-   * Inicializa el plugin: instala el CSL y aplica los monkey-patches.
-   */
-  async init({ id, version, rootURI }) {
+  // Variables de nombre de CSL, en el orden en que suelen imprimirse.
+  VARIABLES_NOMBRE: ["author", "editor", "translator", "composer", "director", "interviewer",
+    "recipient", "editorial-director", "collection-editor", "container-author", "illustrator",
+    "original-author", "reviewed-author"],
+
+  _log(msg) {
+    if (typeof Zotero !== "undefined" && Zotero.debug) Zotero.debug("APA7-UOC: " + msg);
+  },
+
+  // =========================================================================
+  // CICLO DE VIDA
+  // =========================================================================
+
+  init(rootURI) {
     this._rootURI = rootURI;
-
-    Zotero.debug("APA7-UOC: ========================================");
-    Zotero.debug("APA7-UOC: Inicializando plugin v" + version);
-
-    // 1. Instalar el estilo CSL personalizado
-    await this._installCSLStyle();
-
-    // 2. Aplicar monkey-patches a la generación de bibliografías
-    this._patchBibliography();
-
-    Zotero.debug("APA7-UOC: Plugin inicializado correctamente");
-    Zotero.debug("APA7-UOC: ========================================");
   },
 
-  /**
-   * Desactiva el plugin: restaura las funciones originales.
-   */
-  shutdown() {
-    Zotero.debug("APA7-UOC: Desactivando plugin...");
-
-    if (this._originalMakeFormatted) {
-      Zotero.Cite.makeFormattedBibliographyOrCitationList =
-        this._originalMakeFormatted;
-      this._originalMakeFormatted = null;
-    }
-
-    if (this._originalMakeFormatted2) {
-      Zotero.Cite.makeFormattedBibliography = this._originalMakeFormatted2;
-      this._originalMakeFormatted2 = null;
-    }
-
-    if (this._originalQuickCopy) {
-      Zotero.QuickCopy.getContentFromItems = this._originalQuickCopy;
-      this._originalQuickCopy = null;
-    }
-
-    Zotero.debug("APA7-UOC: Plugin desactivado");
-  },
-
-  // =========================================================================
-  // INSTALACIÓN DEL ESTILO CSL
-  // =========================================================================
-
-  async _installCSLStyle() {
+  async installCSL() {
     try {
-      const cslURL = this._rootURI + "csl/apa-uoc-7th.csl";
-      Zotero.debug("APA7-UOC: Leyendo CSL desde " + cslURL);
-      const cslContent = Zotero.File.getContentsFromURL(cslURL);
-
+      const cslContent = Zotero.File.getContentsFromURL(this._rootURI + "csl/apa-uoc-7th.csl");
       if (!cslContent) {
-        Zotero.debug("APA7-UOC: ERROR — No se pudo leer el archivo CSL");
+        this._log("No se pudo leer el CSL del paquete");
         return;
       }
-
-      Zotero.debug("APA7-UOC: CSL leído, tamaño: " + cslContent.length);
-
-      await Zotero.Styles.install(
-        { string: cslContent },
-        "apa-uoc-7th.csl",
-        true
-      );
-
-      Zotero.debug("APA7-UOC: Estilo CSL instalado correctamente");
+      await Zotero.Styles.install({ string: cslContent }, "apa-uoc-7th.csl", true);
+      this._log("Estilo CSL instalado");
     } catch (e) {
-      Zotero.debug("APA7-UOC: CSL install note: " + e.message);
+      this._log("Instalación del CSL: " + e);
     }
   },
 
-  // =========================================================================
-  // MONKEY-PATCHING DE BIBLIOGRAFÍAS
-  // =========================================================================
-
-  _patchBibliography() {
+  /**
+   * Envuelve makeBibliography en el prototipo del motor. Al ser el prototipo,
+   * alcanza también a los motores que Zotero ya tuviera creados o en caché.
+   * @param {object} CSL — espacio de nombres de citeproc-js (Zotero.CiteProc.CSL)
+   */
+  applyPatches(CSL) {
+    if (this._originalMakeBibliography) return;
+    const proto = CSL && CSL.Engine && CSL.Engine.prototype;
+    if (!proto || typeof proto.makeBibliography !== "function") {
+      this._log("No se encuentra CSL.Engine.prototype.makeBibliography; no se aplica el parche");
+      return;
+    }
     const self = this;
+    // Si ya hay un envoltorio nuestro (módulo cargado dos veces sin shutdown),
+    // se parte del método original y no se apila un envoltorio sobre otro.
+    const current = proto.makeBibliography;
+    const original = current.__apa7uocOriginal || current;
+    this._enginePrototype = proto;
+    this._originalMakeBibliography = original;
 
-    // --- Patch 1: makeFormattedBibliographyOrCitationList ---
-    if (
-      typeof Zotero.Cite !== "undefined" &&
-      typeof Zotero.Cite.makeFormattedBibliographyOrCitationList === "function"
-    ) {
-      this._originalMakeFormatted =
-        Zotero.Cite.makeFormattedBibliographyOrCitationList;
-
-      Zotero.Cite.makeFormattedBibliographyOrCitationList = function (
-        cslEngine,
-        items,
-        format,
-        asCitationList
-      ) {
-        Zotero.debug("APA7-UOC: [Patch1] llamado. asCitationList=" + asCitationList + " format=" + format);
-
-        let result = self._originalMakeFormatted.apply(this, arguments);
-
-        if (!asCitationList) {
-          const isUOC = self._isUOCStyle(cslEngine);
-          Zotero.debug("APA7-UOC: [Patch1] isUOC=" + isUOC + " items=" + (items ? items.length : 0));
-
-          if (isUOC && items && items.length > 0) {
-            Zotero.debug("APA7-UOC: [Patch1] Aplicando post-procesamiento...");
-            result = self._injectFullNames(result, items, format);
-          }
-        }
-
-        return result;
-      };
-
-      Zotero.debug("APA7-UOC: Patch1 aplicado a Zotero.Cite.makeFormattedBibliographyOrCitationList");
-    } else {
-      Zotero.debug("APA7-UOC: WARN — Zotero.Cite.makeFormattedBibliographyOrCitationList no encontrada");
-    }
-
-    // --- Patch 2: makeFormattedBibliography ---
-    if (
-      typeof Zotero.Cite !== "undefined" &&
-      typeof Zotero.Cite.makeFormattedBibliography === "function"
-    ) {
-      this._originalMakeFormatted2 = Zotero.Cite.makeFormattedBibliography;
-
-      Zotero.Cite.makeFormattedBibliography = function (cslEngine, format) {
-        Zotero.debug("APA7-UOC: [Patch2] llamado. format=" + format);
-
-        let result = self._originalMakeFormatted2.apply(this, arguments);
-
-        if (result) {
-          const isUOC = self._isUOCStyle(cslEngine);
-          Zotero.debug("APA7-UOC: [Patch2] isUOC=" + isUOC);
-
-          if (isUOC) {
-            const registeredItems = self._getRegisteredItems(cslEngine);
-            Zotero.debug("APA7-UOC: [Patch2] registeredItems=" + registeredItems.length);
-            if (registeredItems.length > 0) {
-              result = self._injectFullNames(result, registeredItems, format);
-            }
-          }
-        }
-
-        return result;
-      };
-
-      Zotero.debug("APA7-UOC: Patch2 aplicado a Zotero.Cite.makeFormattedBibliography");
-    } else {
-      Zotero.debug("APA7-UOC: WARN — Zotero.Cite.makeFormattedBibliography no encontrada");
-    }
-
-    // --- Patch 3: QuickCopy.getContentFromItems ---
-    // Esta es la función que se llama al hacer Ctrl+Shift+C o arrastrar items
-    if (
-      typeof Zotero.QuickCopy !== "undefined" &&
-      typeof Zotero.QuickCopy.getContentFromItems === "function"
-    ) {
-      this._originalQuickCopy = Zotero.QuickCopy.getContentFromItems;
-
-      Zotero.QuickCopy.getContentFromItems = function (items, format, callback, modified) {
-        Zotero.debug("APA7-UOC: [Patch3-QuickCopy] llamado. format=" + JSON.stringify(format));
-
-        let result = self._originalQuickCopy.apply(this, arguments);
-
-        // QuickCopy devuelve { text: "...", html: "..." }
-        if (result && self._isUOCFormatString(format)) {
-          Zotero.debug("APA7-UOC: [Patch3-QuickCopy] Post-procesando resultado de QuickCopy...");
-          if (result.html) {
-            result.html = self._injectFullNames(result.html, items, "html");
-          }
-          if (result.text) {
-            result.text = self._injectFullNames(result.text, items, "text");
-          }
-        }
-
-        return result;
-      };
-
-      Zotero.debug("APA7-UOC: Patch3 aplicado a Zotero.QuickCopy.getContentFromItems");
-    } else {
-      Zotero.debug("APA7-UOC: WARN — Zotero.QuickCopy.getContentFromItems no encontrada");
-    }
-  },
-
-  /**
-   * Verifica si el motor CSL está usando nuestro estilo UOC.
-   * Busca en múltiples ubicaciones del objeto cslEngine.
-   */
-  _isUOCStyle(cslEngine) {
-    try {
-      if (!cslEngine) {
-        Zotero.debug("APA7-UOC: _isUOCStyle: cslEngine es null/undefined");
-        return false;
-      }
-
-      // Intento 1: opt.styleID (ubicación más común en citeproc-js)
-      if (cslEngine.opt && cslEngine.opt.styleID) {
-        Zotero.debug("APA7-UOC: _isUOCStyle: opt.styleID = " + cslEngine.opt.styleID);
-        if (cslEngine.opt.styleID.includes("apa-uoc")) return true;
-      }
-
-      // Intento 2: sys.style
-      if (cslEngine.sys && cslEngine.sys.style) {
-        const sysStyle = String(cslEngine.sys.style);
-        Zotero.debug("APA7-UOC: _isUOCStyle: sys.style = " + sysStyle);
-        if (sysStyle.includes("apa-uoc")) return true;
-      }
-
-      // Intento 3: opt["independent-parent"]
-      if (cslEngine.opt && cslEngine.opt["independent-parent"]) {
-        const parent = cslEngine.opt["independent-parent"];
-        Zotero.debug("APA7-UOC: _isUOCStyle: independent-parent = " + parent);
-        if (parent.includes("apa-uoc")) return true;
-      }
-
-      // Intento 4: cslXml (el XML fuente del estilo)
-      if (cslEngine.cslXml) {
-        try {
-          let xmlStr = "";
-          if (typeof cslEngine.cslXml.dataObj === "string") {
-            xmlStr = cslEngine.cslXml.dataObj;
-          } else if (cslEngine.cslXml.xml) {
-            xmlStr = typeof cslEngine.cslXml.xml === "string"
-              ? cslEngine.cslXml.xml
-              : "";
-          }
-          if (xmlStr && xmlStr.includes("apa-uoc")) {
-            Zotero.debug("APA7-UOC: _isUOCStyle: encontrado en cslXml");
-            return true;
-          }
-        } catch (ex) {
-          // Ignorar errores al inspeccionar cslXml
-        }
-      }
-
-      // Intento 5: Buscar en opt.styleName o locale
-      if (cslEngine.opt) {
-        for (const key of ["styleName", "style_id", "style"]) {
-          if (cslEngine.opt[key]) {
-            const val = String(cslEngine.opt[key]);
-            Zotero.debug("APA7-UOC: _isUOCStyle: opt." + key + " = " + val);
-            if (val.includes("apa-uoc") || val.includes("UOC")) return true;
-          }
-        }
-      }
-
-      // Intento 6: Verificar el estilo activo de Quick Copy como fallback
+    proto.makeBibliography = function () {
+      const bib = original.apply(this, arguments);
       try {
-        const activeStyleID = Zotero.Prefs.get("export.quickCopy.setting");
-        if (activeStyleID) {
-          Zotero.debug("APA7-UOC: _isUOCStyle: quickCopy.setting = " + activeStyleID);
-          if (activeStyleID.includes("apa-uoc")) return true;
-        }
-      } catch (ex) {
-        // Ignorar
+        if (bib && self.isUOCEngine(this)) self.processBibliography(this, bib);
+      } catch (e) {
+        self._log("Error al post-procesar la bibliografía: " + e);
       }
-
-      Zotero.debug("APA7-UOC: _isUOCStyle: No se detectó estilo UOC");
-
-      // Log de las propiedades disponibles del engine para diagnóstico
-      if (cslEngine.opt) {
-        const optKeys = Object.keys(cslEngine.opt).slice(0, 20);
-        Zotero.debug("APA7-UOC: _isUOCStyle: opt keys = " + optKeys.join(", "));
-      }
-
-    } catch (e) {
-      Zotero.debug("APA7-UOC: _isUOCStyle: ERROR: " + e.message);
-    }
-    return false;
+      return bib;
+    };
+    proto.makeBibliography.__apa7uocOriginal = original;
+    this._log("Parche aplicado a CSL.Engine.prototype.makeBibliography");
   },
 
-  /**
-   * Verifica si el string de formato de QuickCopy contiene nuestro estilo UOC.
-   * El formato suele ser algo como "bibliography=http://www.zotero.org/styles/apa-uoc-7th"
-   */
-  _isUOCFormatString(format) {
+  removePatches() {
+    if (this._enginePrototype && this._originalMakeBibliography) {
+      this._enginePrototype.makeBibliography = this._originalMakeBibliography;
+    }
+    this._enginePrototype = null;
+    this._originalMakeBibliography = null;
+  },
+
+  isUOCEngine(engine) {
     try {
-      if (!format) return false;
-      const formatStr = typeof format === "string" ? format : JSON.stringify(format);
-      Zotero.debug("APA7-UOC: _isUOCFormatString: " + formatStr);
-      return formatStr.includes("apa-uoc");
+      const id = engine && engine.opt && engine.opt.styleID;
+      return typeof id === "string" && id.indexOf("apa-uoc") !== -1;
     } catch (e) {
       return false;
     }
   },
 
+  // =========================================================================
+  // POST-PROCESO DE LA BIBLIOGRAFÍA
+  // =========================================================================
+
   /**
-   * Obtiene los items registrados en un motor CSL.
+   * Procesa en sitio el resultado de makeBibliography(): [params, entries].
    */
-  _getRegisteredItems(cslEngine) {
+  processBibliography(engine, bib) {
+    const params = bib[0];
+    const entries = bib[1];
+    if (!params || !Array.isArray(params.entry_ids) || !Array.isArray(entries)) return;
+
+    const escape = this._escaper(engine);
+    for (let i = 0; i < entries.length; i++) {
+      const ids = params.entry_ids[i] || [];
+      const names = [];
+      for (const id of ids) {
+        const item = this._retrieveItem(engine, id);
+        if (item) names.push(...this._namesOf(item));
+      }
+      if (names.length && typeof entries[i] === "string") {
+        entries[i] = this.processEntry(entries[i], names, escape);
+      }
+    }
+  },
+
+  _retrieveItem(engine, id) {
     try {
-      if (cslEngine && cslEngine.registry && cslEngine.registry.reflist) {
-        const itemIDs = cslEngine.registry.reflist.map((ref) => ref.id);
-        Zotero.debug("APA7-UOC: _getRegisteredItems: IDs = " + itemIDs.join(", "));
-        return itemIDs
-          .map((id) => {
-            try { return Zotero.Items.get(id); } catch (e) { return null; }
-          })
-          .filter((item) => item);
-      }
+      // El registro del motor ya guarda el ítem con el que compuso la entrada:
+      // se usa ese, sin volver a pedírselo a Zotero.
+      const reg = engine.registry && engine.registry.registry && engine.registry.registry[id];
+      if (reg && reg.ref) return reg.ref;
+      if (typeof engine.retrieveItem === "function") return engine.retrieveItem(id);
+      if (engine.sys && typeof engine.sys.retrieveItem === "function") return engine.sys.retrieveItem(id);
     } catch (e) {
-      Zotero.debug("APA7-UOC: _getRegisteredItems: ERROR: " + e.message);
+      this._log("No se pudo recuperar el ítem " + id + ": " + e);
     }
-    return [];
+    return null;
   },
 
-  // =========================================================================
-  // INYECCIÓN DE NOMBRES COMPLETOS [Nombre]
-  // =========================================================================
-
-  /**
-   * Post-procesa la bibliografía para añadir [NombreCompleto] después de
-   * cada inicial de autor.
-   *
-   * @param {string} bibOutput — La bibliografía generada por CSL
-   * @param {Zotero.Item[]} items — Los items de Zotero
-   * @param {string} format — "html", "text" o "rtf"
-   * @returns {string} — La bibliografía con nombres completos inyectados
-   */
-  _injectFullNames(bibOutput, items, format) {
-    if (!bibOutput || !items || items.length === 0) {
-      Zotero.debug("APA7-UOC: _injectFullNames: sin datos para procesar");
-      return bibOutput;
-    }
-
-    Zotero.debug("APA7-UOC: _injectFullNames: procesando " + items.length + " items, formato=" + format);
-
-    let result = bibOutput;
-
-    for (const item of items) {
-      try {
-        if (!item || typeof item.getCreators !== "function") {
-          Zotero.debug("APA7-UOC: item sin getCreators, saltando");
-          continue;
-        }
-
-        const creators = item.getCreators();
-        if (!creators || creators.length === 0) continue;
-
-        Zotero.debug("APA7-UOC: Item " + item.id + " tiene " + creators.length + " creadores");
-
-        for (const creator of creators) {
-          if (creator.fieldMode === 1 || !creator.firstName) continue;
-
-          const firstName = creator.firstName.trim();
-          const lastName = creator.lastName.trim();
-
-          if (!firstName || !lastName) continue;
-
-          const initials = this._getInitials(firstName);
-
-          Zotero.debug(
-            "APA7-UOC: Procesando: " + lastName + ", " + initials +
-            " → [" + firstName + "]"
-          );
-
-          // Verificar si ya está procesado
-          const bracketCheck = new RegExp(
-            this._escapeRegex(lastName) +
-            ",\\s*" +
-            this._escapeRegex(initials) +
-            "\\s*\\["
-          );
-          if (bracketCheck.test(result)) {
-            Zotero.debug("APA7-UOC: Ya procesado, saltando");
-            continue;
-          }
-
-          // Buscar el patrón "Apellido, I. I." en el texto
-          // Notas: en HTML el texto puede tener tags, así que buscamos
-          // en texto plano y también con posibles spans
-          const escapedLastName = this._escapeRegex(lastName);
-          const escapedInitials = this._escapeRegex(initials);
-
-          // Patrón que busca: Apellido, I. I. (seguido de algo que NO sea [)
-          const searchPattern = new RegExp(
-            "(" + escapedLastName + ",\\s*" + escapedInitials + ")(?!\\s*\\[)",
-            "g"
-          );
-
-          const fullNameBracket = this._formatBracketName(firstName, format);
-
-          const before = result;
-          result = result.replace(searchPattern, "$1 " + fullNameBracket);
-
-          if (result !== before) {
-            Zotero.debug("APA7-UOC: ✓ Reemplazo exitoso para " + lastName + ", " + initials);
-          } else {
-            Zotero.debug(
-              "APA7-UOC: ✗ No se encontró patrón para: '" + lastName + ", " + initials + "'"
-            );
-            // Diagnóstico: mostrar un fragmento del output para entender por qué no matchea
-            const snippet = result.substring(0, 500);
-            Zotero.debug("APA7-UOC: Fragmento de salida: " + snippet);
-          }
-        }
-      } catch (e) {
-        Zotero.debug(
-          "APA7-UOC: Error procesando item " +
-            (item && item.id ? item.id : "?") + ": " + e.message
-        );
+  /** Nombres personales del ítem CSL-JSON, en orden: [{ family, given }]. */
+  _namesOf(item) {
+    const out = [];
+    const vars = this.VARIABLES_NOMBRE.concat(Object.keys(item).filter((k) => this.VARIABLES_NOMBRE.indexOf(k) === -1));
+    for (const v of vars) {
+      const list = item[v];
+      if (!Array.isArray(list)) continue;
+      for (const nm of list) {
+        if (!nm || typeof nm !== "object" || nm.literal) continue;
+        // La partícula que no cae ("de la Fuente") va con el apellido; la que cae
+        // ("Ludwig van Beethoven") sale detrás de las iniciales: "Beethoven, L. van".
+        const family = [nm["non-dropping-particle"], nm.family]
+          .filter((s) => typeof s === "string" && s.trim()).join(" ").trim();
+        const given = typeof nm.given === "string" ? nm.given.trim() : "";
+        const dropping = typeof nm["dropping-particle"] === "string" ? nm["dropping-particle"].trim() : "";
+        if (family && given) out.push({ family, given, dropping });
       }
     }
+    return out;
+  },
 
-    return result;
+  /** Función de escape del formato activo del motor (text, html o rtf). */
+  _escaper(engine) {
+    const fmt = engine && engine.fun && engine.fun.decorate;
+    if (fmt && typeof fmt.text_escape === "function") return (s) => fmt.text_escape(s);
+    return (s) => s;
   },
 
   /**
-   * Genera las iniciales de un nombre.
-   * "María José" → "M. J."
-   * "Jean-Pierre" → "J.-P."
-   * "María Ángeles" → "M. Á."
-   * "A." → "A." (ya es inicial)
+   * Inserta [Nombre] tras las iniciales de cada nombre dentro de una entrada.
+   * @param {string} entry — la entrada formateada
+   * @param {{family:string, given:string}[]} names — nombres de sus ítems, en orden
+   * @param {function} escape — escape del formato de salida
    */
-  _getInitials(firstName) {
-    if (!firstName) return "";
+  processEntry(entry, names, escape) {
+    const used = [];           // intervalos [inicio, fin) ya asignados
+    const inserts = [];        // { pos, text }
+    let cursor = 0;
 
-    // Si ya son iniciales (e.g., "A." o "M. J."), devolver tal cual
-    if (/^[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÄËÏÖÜ]\.(\s*-?\s*[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÄËÏÖÜ]\.)*\s*$/i.test(firstName)) {
-      return firstName.trim();
+    for (const nm of names) {
+      if (this._isOnlyInitials(nm.given)) continue;
+      const expected = this._initialLetters(nm.given);
+      if (!expected.length) continue;
+
+      const candidates = this._findCandidates(entry, nm.family, expected, escape, nm.dropping)
+        .filter((c) => !used.some((u) => c.start < u[1] && c.end > u[0]));
+      if (!candidates.length) continue;
+
+      // El primero a partir del anterior; si no lo hay, el primero libre.
+      const pick = candidates.find((c) => c.start >= cursor) || candidates[0];
+      used.push([pick.start, pick.end]);
+      cursor = pick.end;
+
+      let text = " [" + escape(nm.given) + "]";
+      // "Apellido, I. (2020)" → "Apellido, I. [Nombre]. (2020)": el punto de las
+      // iniciales cerraba el bloque de autoría; tras el corchete hay que reponerlo.
+      if (/^\s+\(\d{4}/.test(entry.slice(pick.end))) text += ".";
+      inserts.push({ pos: pick.end, text });
     }
 
-    const parts = firstName.split(/\s+/);
-    const inits = [];
-    for (let i = 0; i < parts.length; i++) {
-      const p = parts[i];
-      if (!p) continue;
-      if (p.includes("-")) {
-        // Nombres con guión: "Jean-Pierre" → "J.-P."
-        inits.push(p.split("-").filter(s => s.length > 0)
-          .map(s => s.charAt(0).toUpperCase() + ".").join("-"));
-      } else if (/^[A-Z]\.[A-Z]/i.test(p)) {
-        // Iniciales compuestas: "G.L." o "G.L" → "G.", "L."
-        const letters = p.match(/[A-Za-z]/g);
-        if (letters && letters.length >= 2) {
-          for (let k = 0; k < letters.length; k++) {
-            inits.push(letters[k].toUpperCase() + ".");
-          }
-        } else {
-          inits.push(p.charAt(0).toUpperCase() + ".");
-        }
+    inserts.sort((a, b) => b.pos - a.pos);
+    let out = entry;
+    for (const ins of inserts) out = out.slice(0, ins.pos) + ins.text + out.slice(ins.pos);
+    return out;
+  },
+
+  /**
+   * Busca "Apellido, I. I." en la entrada, con fronteras por los dos lados y
+   * con las iniciales cotejadas letra a letra contra el nombre de pila.
+   */
+  _findCandidates(entry, family, expected, escape, dropping) {
+    const famRe = this._familyPattern(family, escape);
+    const dropRe = dropping ? "(?:\\s+" + this._familyPattern(dropping, escape) + ")?" : "";
+    // Una inicial: letra mayúscula (o su escape RTF) seguida de punto.
+    const ini = "(?:\\p{Lu}|\\\\uc0\\\\u\\d+\\{\\})\\.";
+    const re = new RegExp("(" + famRe + "),\\s*(" + ini + "(?:[\\s-]?" + ini + ")*)(?![\\s-]?(?:\\p{Lu}|\\\\uc0\\\\u\\d+\\{\\})\\.)" + dropRe + "(?!\\s*\\[)", "gu");
+    const out = [];
+    let m;
+    while ((m = re.exec(entry))) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (!this._leftBoundaryOk(entry, start)) continue;
+      const letters = this._lettersOfRendered(m[2]);
+      if (!this._sameLetters(letters, expected)) continue;
+      out.push({ start, end });
+    }
+    return out;
+  },
+
+  /** Expresión del apellido tal como lo imprime el motor (escapado y con apóstrofo tipográfico). */
+  _familyPattern(family, escape) {
+    let out = "";
+    for (const ch of family) {
+      if (ch === "'" || ch === "’") {
+        const alts = [escape("'"), escape("’"), "'", "’", "&#39;", "&#039;"]
+          .filter((v, i, a) => a.indexOf(v) === i).map((s) => this._escapeRegex(s));
+        out += "(?:" + alts.join("|") + ")";
+      } else if (/\s/.test(ch)) {
+        out += "\\s+";
       } else {
-        inits.push(p.charAt(0).toUpperCase() + ".");
+        out += this._escapeRegex(escape(ch));
       }
     }
-
-    return inits.join(" ");
+    return out;
   },
 
   /**
-   * Formatea el nombre completo entre corchetes según el formato de salida.
+   * Frontera izquierda: el apellido empieza la entrada o sigue a un separador
+   * de autores. No vale si es la cola de otro apellido ("García Ruiz").
    */
-  _formatBracketName(firstName, format) {
-    switch (format) {
-      case "html":
-        return "[" + this._escapeHTML(firstName) + "]";
-      case "rtf":
-        return "[" + firstName + "]";
-      default:
-        return "[" + firstName + "]";
+  _leftBoundaryOk(entry, start) {
+    if (start === 0) return true;
+    const prev = entry[start - 1];
+    if (!/\s/.test(prev)) {
+      // Pegado a una letra, cifra, guion o apóstrofo: es parte de otra palabra.
+      return !/[\p{L}\p{N}\-'’]/u.test(prev);
     }
+    // Precedido de espacio: mirar la palabra anterior.
+    const before = entry.slice(0, start).replace(/\s+$/, "");
+    if (!before.length) return true;
+    const last = before.slice(before.length - 1);
+    if (/[,;\]>}…]/.test(last) || before.endsWith("...")) return true;
+    const word = (before.match(/(\S+)$/) || ["", ""])[1];
+    return this.CONJUNCIONES.indexOf(word.toLowerCase()) !== -1;
   },
 
-  // =========================================================================
-  // UTILIDADES
-  // =========================================================================
+  /** Letras de unas iniciales tal como salen del motor ("J.-P.", "\uc0\u193{}."). */
+  _lettersOfRendered(s) {
+    const out = [];
+    const re = /\\uc0\\u(\d+)\{\}|(\p{Lu})/gu;
+    let m;
+    while ((m = re.exec(s))) out.push(m[1] ? String.fromCharCode(+m[1]) : m[2]);
+    return out;
+  },
+
+  /** Primera letra de cada componente del nombre de pila, en mayúscula. */
+  _initialLetters(given) {
+    return given.split(/[\s\-.]+/).filter(Boolean).map((p) => p.charAt(0).toUpperCase());
+  },
+
+  _sameLetters(a, b) {
+    if (a.length !== b.length) return false;
+    const norm = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toUpperCase();
+    return a.every((x, i) => x === b[i] || norm(x) === norm(b[i]));
+  },
+
+  /**
+   * true si el nombre de pila son solo iniciales y no aporta nada:
+   * "A.", "P. A.", "J.-P.", "G.L." → true; "P. Antonio", "María J." → false.
+   */
+  _isOnlyInitials(given) {
+    if (!given) return true;
+    return given.split(/[\s\-.]+/).filter(Boolean).every((p) => /^\p{L}$/u.test(p));
+  },
 
   _escapeRegex(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  },
-
-  _escapeHTML(str) {
-    const map = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#039;",
-    };
-    return str.replace(/[&<>"']/g, (m) => map[m]);
   },
 };

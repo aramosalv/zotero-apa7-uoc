@@ -1,0 +1,14 @@
+{
+  "name": "zotero-apa7-uoc",
+  "private": true,
+  "description": "Pruebas del plugin APA 7.ª edición – Adaptación UOC (no forma parte del .xpi)",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "test": "node test/run.js && node test/bootstrap_test.js",
+    "test:v130": "node test/run.js --v130",
+    "test:zotero": "bash test/descarga_citeproc_zotero.sh 9.0.6 10.0.6 && CITEPROC=zotero-9.0.6 npm test && CITEPROC=zotero-10.0.6 npm test"
+  },
+  "devDependencies": {
+    "citeproc": "2.4.63"
+  }
+}

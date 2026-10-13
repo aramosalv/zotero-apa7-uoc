@@ -20,3 +20,7 @@ Desktop.ini
 # Internal project docs (not for GitHub)
 ESTADO_PROYECTO.md
 CLAUDE.md
+
+# Pruebas
+node_modules/
+test/fixtures/citeproc_zotero_*.js
